@@ -157,7 +157,7 @@ const FaceDetectorVisionCamera = () => {
       const output = OpenCV.createObject(
         ObjectType.Mat,
         frame.height,
-        frame.height,
+        frame.width,
         DataTypes.CV_64F,
       );
 
