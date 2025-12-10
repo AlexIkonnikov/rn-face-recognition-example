@@ -1,8 +1,7 @@
 import {StyleSheet, Text, TouchableOpacity} from 'react-native';
-import {useEffect, useRef} from 'react';
+import React, {useEffect, useRef} from 'react';
 import {
   Camera,
-  Frame,
   useCameraDevice,
   useCameraFormat,
   useCameraPermission,
@@ -10,7 +9,6 @@ import {
 } from 'react-native-vision-camera';
 import {
   FaceDetectionOptions,
-  Landmarks,
   useFaceDetector,
 } from 'react-native-vision-camera-face-detector';
 import {useSharedValue, Worklets} from 'react-native-worklets-core';
@@ -24,8 +22,6 @@ import {
   OpenCV,
 } from 'react-native-fast-opencv';
 import useFaceNet from './useFaceNet.ts';
-import {cosineSimilarity} from './cosineSimilarity.ts';
-import {l2Normalize} from './l2Normalize.ts';
 
 const FaceDetectorVisionCamera = () => {
   const canvasRef = useRef<Canvas>(null);
@@ -39,7 +35,7 @@ const FaceDetectorVisionCamera = () => {
   const model = useFaceNet();
 
   const faceDetectionOptions = useRef<FaceDetectionOptions>({
-    cameraFacing: 'front',
+    cameraFacing: 'back',
     performanceMode: 'accurate',
     landmarkMode: 'all',
   }).current;
@@ -54,36 +50,19 @@ const FaceDetectorVisionCamera = () => {
   const format = useCameraFormat(device, []);
   const {detectFaces} = useFaceDetector(faceDetectionOptions);
 
-  const drawOnCanvas = Worklets.createRunOnJS(
-    async (
-      floatRGBArray: Float32Array,
-      width: number,
-      height: number,
-      isFirst: boolean,
-    ) => {
-      const canvas = isFirst ? canvasRef.current : canvasRef2.current;
-      if (!canvas || !floatRGBArray) {
+  const draw = Worklets.createRunOnJS(
+    async (array: number[], width: number, height: number) => {
+      const canvas = canvasRef.current;
+      if (!canvas) {
         return;
       }
       const ctx = canvas.getContext('2d');
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
       canvas.width = width;
       canvas.height = height;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      const imageDataArray = new Uint8ClampedArray(width * height * 4);
-
-      for (let i = 0, j = 0; i < imageDataArray.length; i += 4, j += 3) {
-        imageDataArray[i] = Math.round(floatRGBArray[j] * 255); // R
-        imageDataArray[i + 1] = Math.round(floatRGBArray[j + 1] * 255); // G
-        imageDataArray[i + 2] = Math.round(floatRGBArray[j + 2] * 255); // B
-        imageDataArray[i + 3] = 255; // Alpha (полностью непрозрачное)
-      }
-      const imageData = new ImageData(
-        canvas,
-        Array.from(imageDataArray),
-        height,
-        width,
-      );
+      const imageData = new ImageData(canvas, array, height, width);
       ctx.putImageData(imageData, 0, 0);
     },
   );
@@ -94,6 +73,9 @@ const FaceDetectorVisionCamera = () => {
       if (!isActive.value) {
         return;
       }
+      isActive.value = false;
+      const desiredFaceWidth = 160;
+      const desiredLeftEye = {x: 0.31, y: 0.31};
 
       const faces = detectFaces(frame);
       if (faces.length === 0) {
@@ -102,14 +84,9 @@ const FaceDetectorVisionCamera = () => {
       }
 
       const face = faces[0];
-      if (!face?.landmarks?.LEFT_EYE || !face?.landmarks?.RIGHT_EYE) {
-        isActive.value = false;
+      if (!face.landmarks) {
         return;
       }
-
-      isActive.value = false;
-
-      const {x, y, height, width} = face.bounds;
 
       const resizedFrame = resize(frame, {
         scale: {
@@ -120,7 +97,8 @@ const FaceDetectorVisionCamera = () => {
         dataType: 'uint8',
       });
 
-      const srcMat = OpenCV.frameBufferToMat(
+      const srcMat = OpenCV.bufferToMat(
+        'uint8',
         frame.height,
         frame.width,
         3,
@@ -143,8 +121,12 @@ const FaceDetectorVisionCamera = () => {
       const dx = rightEye.x - leftEye.x;
       let angle = Math.atan2(dy, dx) * (180.0 / Math.PI);
 
-      const currentDist = Math.hypot(dx, dy); // текущее расстояние между глазами
-      const desiredDist = 80.0; // целевое расстояние между глазами
+      let desiredRightEyeX = 1 - desiredLeftEye.x;
+
+      const currentDist = Math.hypot(dx, dy);
+      const desiredDist =
+        (desiredRightEyeX - desiredLeftEye.x) * desiredFaceWidth;
+
       const scale = desiredDist / currentDist;
 
       const rotMat = OpenCV.createObject(
@@ -155,127 +137,73 @@ const FaceDetectorVisionCamera = () => {
       );
       OpenCV.invoke('getRotationMatrix2D', eyesCenter, angle, scale, rotMat);
 
-      const {cols, rows} = OpenCV.toJSValue(srcMat);
+      const transformMat = OpenCV.matToBuffer(rotMat, 'float64');
+      const tX = desiredFaceWidth * 0.5;
+      const tY = desiredFaceWidth * desiredLeftEye.y;
 
-      const dstSize = OpenCV.createObject(ObjectType.Size, cols, rows);
+      transformMat.buffer[2] += tX - centerX;
+      transformMat.buffer[5] += tY - centerY;
 
-      const alignedMat = OpenCV.createObject(
-        ObjectType.Mat,
-        0,
-        0,
-        DataTypes.CV_8UC3,
+      const updatedRotateMat = OpenCV.bufferToMat(
+        'float64',
+        2,
+        3,
+        1,
+        transformMat.buffer,
       );
-      OpenCV.invoke('warpAffine', srcMat, alignedMat, rotMat, dstSize);
 
-      // Задаём квадратный ROI 160x160, центрированный на точке eyesCenter (середине глаз).
-      const cx = Math.round(centerX); // координаты eyesCenter были float, округляем до целого
-      const cy = Math.round(centerY);
-      const half = 80; // половина стороны квадрата 160
+      const output = OpenCV.createObject(
+        ObjectType.Mat,
+        frame.height,
+        frame.width,
+        DataTypes.CV_64F,
+      );
 
-      // Координаты левого верхнего угла ROI (с учётом границ изображения)
-      let roiX = cx - half;
-      let roiY = cy - half;
-      if (roiX < 0) {
-        roiX = 0;
-      }
-      if (roiY < 0) {
-        roiY = 0;
-      }
+      OpenCV.invoke(
+        'warpAffine',
+        srcMat,
+        output,
+        updatedRotateMat,
+        OpenCV.createObject(ObjectType.Size, 160, 160),
+      );
 
-      const alignedMatInfo = OpenCV.toJSValue(alignedMat);
-
-      if (roiX + 160 > alignedMatInfo.cols) {
-        roiX = alignedMatInfo.cols - 160;
-      }
-      if (roiY + 160 > alignedMatInfo.rows) {
-        roiY = alignedMatInfo.rows - 160;
-      }
-
-      const faceRect = OpenCV.createObject(
-        ObjectType.Rect,
-        roiX,
-        roiY,
+      const resizedMat = OpenCV.createObject(
+        ObjectType.Mat,
         160,
         160,
+        DataTypes.CV_8UC4,
       );
 
-      // Вырезаем ROI из повернутого изображения
-      const faceMat = OpenCV.createObject(
-        ObjectType.Mat,
-        0,
-        0,
-        DataTypes.CV_8UC3,
-      );
-      OpenCV.invoke('crop', alignedMat, faceMat, faceRect);
-
-      // Масштабируем faceMat к точному размеру 160x160 (если нужно)
-      const size160 = OpenCV.createObject(ObjectType.Size, 160, 160);
-      const faceResized = OpenCV.createObject(
-        ObjectType.Mat,
-        0,
-        0,
-        DataTypes.CV_8UC3,
-      );
       OpenCV.invoke(
         'resize',
-        faceMat,
-        faceResized,
-        size160,
+        output,
+        resizedMat,
+        OpenCV.createObject(ObjectType.Size, 160, 160),
         1,
         1,
         InterpolationFlags.INTER_LINEAR,
       );
 
-      const faceRGB = OpenCV.createObject(
+      const rgbaMat = OpenCV.createObject(
         ObjectType.Mat,
-        0,
-        0,
-        DataTypes.CV_8UC3,
+        160,
+        160,
+        DataTypes.CV_8UC4,
       );
+
       OpenCV.invoke(
         'cvtColor',
-        faceResized,
-        faceRGB,
-        ColorConversionCodes.COLOR_BGR2RGB,
+        resizedMat,
+        rgbaMat,
+        ColorConversionCodes.COLOR_BGR2RGBA,
       );
 
-      const faceFloat = OpenCV.createObject(
-        ObjectType.Mat,
-        0,
-        0,
-        DataTypes.CV_32FC3,
+      const uint8 = OpenCV.matToBuffer(rgbaMat, 'uint8');
+      draw(Array.from(uint8.buffer), uint8.cols, uint8.rows).finally(
+        OpenCV.clearBuffers,
       );
-      OpenCV.invoke(
-        'convertTo',
-        faceRGB,
-        faceFloat,
-        DataTypes.CV_32FC3,
-        1 / 255,
-        0,
-      );
-
-      const result = OpenCV.matToBuffer(faceFloat, 'float32');
-
-      drawOnCanvas(result.buffer, result.rows, result.cols, !embedding.current);
-
-      const faceEmbeddings = model?.runSync([result.buffer]) as Float32Array[];
-
-      if (!faceEmbeddings) {
-        OpenCV.clearBuffers();
-        return;
-      }
-
-      if (!embedding.current) {
-        embedding.current = l2Normalize(faceEmbeddings[0].slice());
-      } else {
-        console.log(
-          cosineSimilarity(embedding.current, l2Normalize(faceEmbeddings[0])),
-        );
-      }
-
-      OpenCV.clearBuffers();
     },
-    [isActive.value, OpenCV, drawOnCanvas, model, embedding.current],
+    [isActive.value, OpenCV, draw, model, embedding.current],
   );
 
   return (
@@ -291,11 +219,11 @@ const FaceDetectorVisionCamera = () => {
             androidPreviewViewType={'texture-view'}
           />
           <TouchableOpacity
+            style={styles.container}
             onPress={() => {
               isActive.value = !isActive.value;
-            }}
-            style={styles.btn}>
-            <Text>Распознать</Text>
+            }}>
+            <Text>Recognize face</Text>
           </TouchableOpacity>
           <Canvas ref={canvasRef} style={styles.canvas} />
           <Canvas ref={canvasRef2} style={styles.canvas2} />
@@ -306,14 +234,15 @@ const FaceDetectorVisionCamera = () => {
 };
 
 const styles = StyleSheet.create({
-  btn: {
+  container: {
     position: 'absolute',
     width: '100%',
-    bottom: 0,
     backgroundColor: 'green',
+    bottom: 0,
     padding: 20,
     alignItems: 'center',
   },
+
   canvas: {
     position: 'absolute',
     bottom: 100,
