@@ -77,7 +77,7 @@ const FaceDetectorVisionCamera = () => {
       }
       isActive.value = false;
       const desiredFaceWidth = 160;
-      const desiredLeftEye = {x: 0.3, y: 0.3};
+      const desiredLeftEye = {x: 0.31, y: 0.31};
 
       const faces = detectFaces(frame);
       if (faces.length === 0) {
@@ -169,20 +169,6 @@ const FaceDetectorVisionCamera = () => {
         OpenCV.createObject(ObjectType.Size, 160, 160),
       );
 
-      const rgbaMat = OpenCV.createObject(
-        ObjectType.Mat,
-        160,
-        160,
-        DataTypes.CV_8UC4,
-      );
-
-      OpenCV.invoke(
-        'cvtColor',
-        output,
-        rgbaMat,
-        ColorConversionCodes.COLOR_BGR2RGBA,
-      );
-
       const resizedMat = OpenCV.createObject(
         ObjectType.Mat,
         160,
@@ -192,7 +178,7 @@ const FaceDetectorVisionCamera = () => {
 
       OpenCV.invoke(
         'resize',
-        rgbaMat,
+        output,
         resizedMat,
         OpenCV.createObject(ObjectType.Size, 160, 160),
         1,
@@ -200,8 +186,21 @@ const FaceDetectorVisionCamera = () => {
         InterpolationFlags.INTER_LINEAR,
       );
 
-      const uint8 = OpenCV.matToBuffer(resizedMat, 'uint8');
+      const rgbaMat = OpenCV.createObject(
+        ObjectType.Mat,
+        160,
+        160,
+        DataTypes.CV_8UC4,
+      );
 
+      OpenCV.invoke(
+        'cvtColor',
+        resizedMat,
+        rgbaMat,
+        ColorConversionCodes.COLOR_BGR2RGBA,
+      );
+
+      const uint8 = OpenCV.matToBuffer(rgbaMat, 'uint8');
       draw(Array.from(uint8.buffer), uint8.cols, uint8.rows).finally(
         OpenCV.clearBuffers,
       );
