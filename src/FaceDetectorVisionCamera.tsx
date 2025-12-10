@@ -1,5 +1,5 @@
 import {StyleSheet, Text, TouchableOpacity} from 'react-native';
-import {useEffect, useRef} from 'react';
+import React, {useEffect, useRef} from 'react';
 import {
   Camera,
   useCameraDevice,
@@ -22,8 +22,6 @@ import {
   OpenCV,
 } from 'react-native-fast-opencv';
 import useFaceNet from './useFaceNet.ts';
-import {l2Normalize} from './l2Normalize.ts';
-import {cosineSimilarity} from './cosineSimilarity.ts';
 
 const FaceDetectorVisionCamera = () => {
   const canvasRef = useRef<Canvas>(null);
@@ -225,7 +223,7 @@ const FaceDetectorVisionCamera = () => {
             onPress={() => {
               isActive.value = !isActive.value;
             }}>
-            <Text>Распознать</Text>
+            <Text>Recognize face</Text>
           </TouchableOpacity>
           <Canvas ref={canvasRef} style={styles.canvas} />
           <Canvas ref={canvasRef2} style={styles.canvas2} />
